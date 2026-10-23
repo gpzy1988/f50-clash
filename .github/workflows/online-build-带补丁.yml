@@ -297,4 +297,4 @@ jobs:
           echo "构建完成（已打并提交 1 个补丁：订阅导入修复）, 产物:"
           ls -lh release/
           echo "下载: Actions 页 → 本次运行 → 底部 Artifacts → f50mgr-online-build"
-#（注：内容由AI生成）
+

@@ -258,7 +258,12 @@ jobs:
           PATCH_EOF
           git apply --3way /tmp/patch-1-subscription.patch \
             || { echo '补丁应用失败：源码与补丁基线不一致，请重新生成补丁'; exit 1; }
-          echo '已应用 1 个补丁：订阅导入修复'
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git add -A
+          git commit -m "apply f50-clash-subscription-fix.patch (订阅导入修复)" \
+            --author="GitHub Actions <actions@github.com>"
+          echo '已应用并提交 1 个补丁：订阅导入修复'
 
       - name: 校验构建依赖
         run: |
@@ -289,7 +294,7 @@ jobs:
 
       - name: 编译摘要
         run: |
-          echo "构建完成（已打 1 个补丁：订阅导入修复）, 产物:"
+          echo "构建完成（已打并提交 1 个补丁：订阅导入修复）, 产物:"
           ls -lh release/
           echo "下载: Actions 页 → 本次运行 → 底部 Artifacts → f50mgr-online-build"
 #（注：内容由AI生成）

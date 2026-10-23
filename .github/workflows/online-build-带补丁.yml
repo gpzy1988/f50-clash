@@ -1,0 +1,295 @@
+name: Online Build（带补丁）
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 要编译的分支或标签（留空 = 默认分支）
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: f50mgr 在线编译（带补丁）
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: 检出完整 Git 历史
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 应用补丁（订阅导入修复）
+        run: |
+          set -euo pipefail
+          cat > /tmp/patch-1-subscription.patch <<'PATCH_EOF'
+          diff --git a/src/subscription/mod.rs b/src/subscription/mod.rs
+          index c9081ce..8acbcba 100644
+          --- a/src/subscription/mod.rs
+          +++ b/src/subscription/mod.rs
+          @@ -2,7 +2,7 @@ pub mod easytier;
+           
+           use std::{
+               fs,
+          -    io::{ErrorKind, Write},
+          +    io::{ErrorKind, Read, Write},
+               net::IpAddr,
+               os::fd::AsRawFd,
+               os::unix::fs::{OpenOptionsExt, PermissionsExt},
+          @@ -17,6 +17,7 @@ use std::{
+           
+           use anyhow::{anyhow, bail, Context, Result};
+           use base64::Engine as _;
+          +use flate2::read::GzDecoder;
+           use serde_yml::{Mapping, Value};
+           use tracing::warn;
+           
+          @@ -28,6 +29,9 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+           
+           const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+           const MAX_SUBSCRIPTION_BYTES: u64 = MAX_IMPORT_BYTES as u64;
+          +/// 订阅下载 User-Agent。不少机场按客户端 UA 放行（clash 系），默认伪装成常见 clash 客户端；
+          +/// 若你的机场要求指定 UA，改这里即可。
+          +const SUBSCRIPTION_UA: &str = "clash-verge/v2.0.0 (f50mgr; ua)";
+           const LAN_BIND_IP: &str = "192.168.0.1";
+           const HTTP_PORT: u16 = 14191;
+           const SOCKS_PORT: u16 = 14192;
+          @@ -140,9 +144,13 @@ fn render_config_inner(subscription: &str, controller_secret: Option<&str>) -> R
+               let normalized = decode_if_base64(subscription);
+               // Step 2: 解析 YAML
+               let mut root: Value = serde_yml::from_str(&normalized).context("解析订阅 YAML 失败")?;
+          -    let root_map = root
+          -        .as_mapping_mut()
+          -        .context("订阅 YAML 顶层必须是 mapping")?;
+          +    let kind = yaml_kind(&root);
+          +    let snippet: String = normalized.chars().take(64).collect();
+          +    let root_map = root.as_mapping_mut().with_context(|| {
+          +        format!(
+          +            "订阅 YAML 顶层必须是 mapping（实际解析为 {kind}）——文件导入正常而 URL 导入失败，通常是：① 响应被 base64 编码（含无填充变体）未解码成功；② 机场要求特定 User-Agent；③ 返回了 HTML/鉴权页而非 Clash 配置。首 64 字符: {snippet}"
+          +        )
+          +    })?;
+               // Step 3: 警告外部 providers（F50 启动期可能拉不到）—— 仅 import 路径警告，避免每次启动刷屏
+               warn_external_providers(root_map);
+               // Step 4: 注入 F50 必需配置（含 sanitize_dangerous_fields）
+          @@ -154,21 +162,18 @@ fn render_config_inner(subscription: &str, controller_secret: Option<&str>) -> R
+               serde_yml::to_string(&root).context("序列化 Mihomo 配置失败")
+           }
+           
+          -/// 检测订阅是否是 base64 编码（trim 后只含 base64 字符且不含 YAML 标志符），
+          +/// 检测订阅是否是 base64 编码（剔除注释行与空白后只含 base64 字符且不含 YAML 标志符），
+           /// 是则解码后返回，否则返回原文。无法解码时也返回原文（让后续 YAML 解析自行报错）。
+           fn decode_if_base64(content: &str) -> String {
+               let trimmed = content.trim();
+               if trimmed.is_empty() {
+                   return content.to_owned();
+               }
+          -    // YAML 文档典型含 ":" / "-" 行首 / 换行键值，base64 不会出现
+          -    if trimmed.contains(':') || trimmed.contains("---") || trimmed.contains("# ") {
+          -        return content.to_owned();
+          -    }
+          -    // base64 字符集 + 末尾可能 = 填充。容忍内部空白（机场常带换行）
+          +    // 先剔除注释行（部分机场在 base64 前加 "# 订阅名" 行）与全部空白
+               let cleaned: String = trimmed
+          -        .chars()
+          -        .filter(|c| !c.is_whitespace())
+          +        .lines()
+          +        .filter(|line| !line.trim_start().starts_with('#'))
+          +        .flat_map(|line| line.chars().filter(|c| !c.is_whitespace()))
+                   .collect();
+               if cleaned.is_empty()
+                   || !cleaned
+          @@ -177,16 +182,33 @@ fn decode_if_base64(content: &str) -> String {
+               {
+                   return content.to_owned();
+               }
+          -    // 同时尝试 standard 与 url-safe 两种 alphabet
+          +    // 明文 YAML 含 ":" / "---"，base64 不会出现 → 直接返回原文
+          +    if cleaned.contains(':') || cleaned.contains("---") {
+          +        return content.to_owned();
+          +    }
+          +    // 同时尝试 standard / url-safe，带填充与不带填充四种组合；
+          +    // 无填充 base64（len % 4 != 0）先按需补 "=" 再试一遍。
+               let engines = [
+                   &base64::engine::general_purpose::STANDARD,
+                   &base64::engine::general_purpose::URL_SAFE,
+          +        &base64::engine::general_purpose::STANDARD_NO_PAD,
+          +        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+               ];
+          -    for engine in engines {
+          -        if let Ok(bytes) = engine.decode(&cleaned) {
+          -            if let Ok(text) = String::from_utf8(bytes) {
+          -                if text.contains(':') || text.contains("\n") {
+          -                    return text;
+          +    let padded = match cleaned.len() % 4 {
+          +        1 => None, // 余 1 的 base64 长度非法，无法补齐
+          +        rem if rem > 1 => Some(format!("{cleaned}{}", "=".repeat(4 - rem))),
+          +        _ => None,
+          +    };
+          +    for candidate in [Some(cleaned.as_str()), padded.as_deref()]
+          +        .into_iter()
+          +        .flatten()
+          +    {
+          +        for engine in engines {
+          +            if let Ok(bytes) = engine.decode(candidate) {
+          +                if let Ok(text) = String::from_utf8(bytes) {
+          +                    if is_plausible_yaml(&text) {
+          +                        return text;
+          +                    }
+                           }
+                       }
+                   }
+          @@ -194,6 +216,27 @@ fn decode_if_base64(content: &str) -> String {
+               content.to_owned()
+           }
+           
+          +/// 解码结果是否像订阅配置：含换行/冒号，或本身就是 YAML mapping。
+          +fn is_plausible_yaml(text: &str) -> bool {
+          +    if text.contains('\n') || text.contains(':') {
+          +        return true;
+          +    }
+          +    serde_yml::from_str::<Value>(text).map_or(false, |value| value.is_mapping())
+          +}
+          +
+          +/// 顶层解析出的 YAML 类型（用于错误诊断）
+          +fn yaml_kind(value: &Value) -> &'static str {
+          +    if value.is_mapping() {
+          +        "mapping"
+          +    } else if value.is_sequence() {
+          +        "sequence"
+          +    } else if value.is_scalar() {
+          +        "scalar"
+          +    } else {
+          +        "null/空文档"
+          +    }
+          +}
+          +
+           fn warn_external_providers(root: &Mapping) {
+               for (field, kind) in [("proxy-providers", "代理"), ("rule-providers", "规则")] {
+                   if matches!(root.get(key(field)), Some(Value::Mapping(_))) {
+          @@ -356,15 +399,42 @@ fn download_subscription(url: &str) -> Result<String> {
+                   .build();
+               let agent: ureq::Agent = config.into();
+           
+          -    agent
+          +    let mut response = agent
+                   .get(url)
+          +        .header("User-Agent", SUBSCRIPTION_UA)
+                   .call()
+          -        .with_context(|| format!("下载订阅失败: {url}"))?
+          +        .with_context(|| format!("下载订阅失败: {url}"))?;
+          +    if !response.status().is_success() {
+          +        bail!("订阅服务器返回 HTTP {}: {url}", response.status());
+          +    }
+          +
+          +    let mut bytes = response
+                   .body_mut()
+                   .with_config()
+                   .limit(MAX_SUBSCRIPTION_BYTES)
+          -        .read_to_string()
+          -        .context("读取订阅响应失败")
+          +        .read_to_vec()
+          +        .context("读取订阅响应失败")?;
+          +    // ureq 未启用 gzip feature：Content-Encoding: gzip（或 gzip 魔数）时手动解压（flate2 已在依赖中）
+          +    let is_gzip = response
+          +        .header("Content-Encoding")
+          +        .map(|value| value.to_ascii_lowercase().contains("gzip"))
+          +        .unwrap_or(false)
+          +        || (bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b);
+          +    let text = if is_gzip {
+          +        let mut decompressed = Vec::new();
+          +        GzDecoder::new(&bytes[..])
+          +            .take(MAX_SUBSCRIPTION_BYTES as u64 + 1)
+          +            .read_to_end(&mut decompressed)
+          +            .context("解压 gzip 订阅响应失败")?;
+          +        if decompressed.len() > MAX_SUBSCRIPTION_BYTES {
+          +            bail!("订阅解压后超过大小限制");
+          +        }
+          +        bytes = decompressed;
+          +        String::from_utf8(bytes).context("订阅响应不是合法 UTF-8")?
+          +    } else {
+          +        String::from_utf8(bytes).context("订阅响应不是合法 UTF-8")?
+          +    };
+          +    Ok(text)
+           }
+           
+           fn apply_f50_required_fields(root_map: &mut Mapping) -> Result<()> {
+          @@ -1017,6 +1087,34 @@ sniffer:
+                   Ok(())
+               }
+           
+          +    #[test]
+          +    fn robustness_decodes_unpadded_base64_subscription() -> Result<()> {
+          +        // 无填充 base64（部分机场直出，len % 4 != 0）：原 STANDARD/URL_SAFE 会拒绝，必须能解码
+          +        let yaml = "proxies: []\nrules: []\n";
+          +        let encoded = base64::engine::general_purpose::STANDARD.encode(yaml);
+          +        let unpadded = encoded.trim_end_matches('=');
+          +        assert!(
+          +            unpadded.len() % 4 != 0,
+          +            "用例必须是未填充的 base64"
+          +        );
+          +        let rendered = render_config(unpadded)?;
+          +        let cfg: Value = serde_yml::from_str(&rendered)?;
+          +        assert!(cfg.as_mapping().unwrap().contains_key(key("proxies")));
+          +        Ok(())
+          +    }
+          +
+          +    #[test]
+          +    fn robustness_ignores_comment_line_before_base64() -> Result<()> {
+          +        // 机场在 base64 前加 "# 订阅名" 注释行
+          +        let yaml = "proxies: []\nrules: []\n";
+          +        let encoded = base64::engine::general_purpose::STANDARD.encode(yaml);
+          +        let with_comment = format!("# demo\n{encoded}");
+          +        let rendered = render_config(&with_comment)?;
+          +        let cfg: Value = serde_yml::from_str(&rendered)?;
+          +        assert!(cfg.as_mapping().unwrap().contains_key(key("proxies")));
+          +        Ok(())
+          +    }
+          +
+               #[test]
+               fn robustness_handles_empty_proxies_and_rules() -> Result<()> {
+                   // 几乎空订阅：仍能渲染，至少有 mihomo 必需字段
+          PATCH_EOF
+          git apply --3way /tmp/patch-1-subscription.patch \
+            || { echo '补丁应用失败：源码与补丁基线不一致，请重新生成补丁'; exit 1; }
+          echo '已应用 1 个补丁：订阅导入修复'
+
+      - name: 校验构建依赖
+        run: |
+          for tool in git docker curl zip unzip; do
+            command -v "${tool}" >/dev/null || { echo "缺少 ${tool}"; exit 1; }
+          done
+          docker version --format 'Docker {{.Server.Version}}'
+
+      - name: 执行官方构建 build.sh
+        run: ./build.sh
+
+      - name: 校验制品 SHA-256
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          test -s "release/f50mgr-${VERSION}.zip"
+          (cd release && sha256sum -c "f50mgr-${VERSION}.zip.sha256")
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+
+      - name: 上传编译产物
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: f50mgr-online-build-带补丁
+          path: |
+            release/f50mgr-${{ env.VERSION }}.zip
+            release/f50mgr-${{ env.VERSION }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 编译摘要
+        run: |
+          echo "构建完成（已打 1 个补丁：订阅导入修复）, 产物:"
+          ls -lh release/
+          echo "下载: Actions 页 → 本次运行 → 底部 Artifacts → f50mgr-online-build"
+#（注：内容由AI生成）

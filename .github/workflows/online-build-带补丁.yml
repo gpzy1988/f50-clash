@@ -31,7 +31,7 @@ jobs:
           set -euo pipefail
           cat > /tmp/patch-1-subscription.patch <<'PATCH_EOF'
           diff --git a/src/subscription/mod.rs b/src/subscription/mod.rs
-          index c9081ce..8acbcba 100644
+          index c9081ce..5b1b083 100644
           --- a/src/subscription/mod.rs
           +++ b/src/subscription/mod.rs
           @@ -2,7 +2,7 @@ pub mod easytier;
@@ -145,7 +145,7 @@ jobs:
                            }
                        }
                    }
-          @@ -194,6 +216,27 @@ fn decode_if_base64(content: &str) -> String {
+          @@ -194,6 +216,25 @@ fn decode_if_base64(content: &str) -> String {
                content.to_owned()
            }
            
@@ -163,17 +163,15 @@ jobs:
           +        "mapping"
           +    } else if value.is_sequence() {
           +        "sequence"
-          +    } else if value.is_scalar() {
-          +        "scalar"
           +    } else {
-          +        "null/空文档"
+          +        "scalar"
           +    }
           +}
           +
            fn warn_external_providers(root: &Mapping) {
                for (field, kind) in [("proxy-providers", "代理"), ("rule-providers", "规则")] {
                    if matches!(root.get(key(field)), Some(Value::Mapping(_))) {
-          @@ -356,15 +399,42 @@ fn download_subscription(url: &str) -> Result<String> {
+          @@ -356,15 +397,44 @@ fn download_subscription(url: &str) -> Result<String> {
                    .build();
                let agent: ureq::Agent = config.into();
            
@@ -198,7 +196,9 @@ jobs:
           +        .context("读取订阅响应失败")?;
           +    // ureq 未启用 gzip feature：Content-Encoding: gzip（或 gzip 魔数）时手动解压（flate2 已在依赖中）
           +    let is_gzip = response
-          +        .header("Content-Encoding")
+          +        .headers()
+          +        .get("content-encoding")
+          +        .and_then(|value| value.to_str().ok())
           +        .map(|value| value.to_ascii_lowercase().contains("gzip"))
           +        .unwrap_or(false)
           +        || (bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b);
@@ -208,7 +208,7 @@ jobs:
           +            .take(MAX_SUBSCRIPTION_BYTES as u64 + 1)
           +            .read_to_end(&mut decompressed)
           +            .context("解压 gzip 订阅响应失败")?;
-          +        if decompressed.len() > MAX_SUBSCRIPTION_BYTES {
+          +        if decompressed.len() > MAX_SUBSCRIPTION_BYTES as usize {
           +            bail!("订阅解压后超过大小限制");
           +        }
           +        bytes = decompressed;

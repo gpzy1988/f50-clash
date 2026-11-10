@@ -12,9 +12,11 @@ permissions:
   contents: read
 
 env:
-  # 补丁内容：订阅导入修复 + 畅行60 网段适配（监听改 0.0.0.0，含 magisk-module/customize.sh 的 listen）
-  PATCH_URL: https://aka.doubaocdn.com/s/09DUUxVdX6
-  PATCH_SHA256: 50c51922a2fe05275777aaac675cba77e9dae2c5038641840c15c71a7e12743b
+  # 订阅导入修复 + 畅行60 网段适配
+  # 关键：TPROXY 的 --on-ip 必须保留 192.168.0.1（内核要投递到真实本地地址），
+  # 模块 service.sh 会把 192.168.0.1/32 补到 lo；对外监听（面板/API/DNS）才是 0.0.0.0
+  PATCH_URL: https://aka.doubaocdn.com/s/5cCRGm384f
+  PATCH_SHA256: 866828d1990678fb9eaebaa5a72afbbb0f1b90e26e10a763df1bbc3780032e75
 
 jobs:
   build:
@@ -36,24 +38,24 @@ jobs:
           curl -fsSL --retry 3 --retry-delay 5 -o /tmp/cx60.patch "$PATCH_URL"
           test -s /tmp/cx60.patch || { echo '补丁下载为空'; exit 1; }
           echo "$PATCH_SHA256  /tmp/cx60.patch" | sha256sum -c - \
-            || { echo '补丁校验失败（下载被截断或被篡改）'; exit 1; }
+            || { echo '补丁校验失败'; exit 1; }
           git apply --3way /tmp/cx60.patch \
-            || { echo '补丁应用失败：源码与补丁基线不一致'; exit 1; }
+            || { echo '补丁应用失败：基线不一致'; exit 1; }
           git config user.email actions@github.com
           git config user.name "GitHub Actions"
           git add -A
-          git commit -m "畅行60 适配：监听改 0.0.0.0 + 订阅导入修复" \
-            --author="GitHub Actions <actions@github.com>"
-          echo '已应用补丁：订阅导入修复 + 畅行60 网段适配（含模块脚本）'
+          git commit -m "畅行60 适配" --author="GitHub Actions <actions@github.com>"
 
-      - name: 校验补丁结果
+      - name: 校验补丁落点
         run: |
           set -e
-          grep -q 'listen = "0.0.0.0:14180"' magisk-module/customize.sh
-          grep -q 'const LAN_BIND_IP: &str = "0.0.0.0";' src/subscription/mod.rs
-          grep -q 'const WEB_LISTEN: &str = "0.0.0.0:14180";' src/main.rs
-          grep -q 'SUBSCRIPTION_UA' src/subscription/mod.rs
-          echo '补丁落点全部确认'
+          grep -q 'const LAN_BIND_IP: &str = "192.168.0.1";' src/iptables/rules.rs || { echo 'TPROXY 投递地址被改错了'; exit 1; }
+          grep -q 'const LAN_BIND_IP: &str = "0.0.0.0";' src/subscription/mod.rs || { echo 'mihomo bind-address 不对'; exit 1; }
+          grep -q 'const WEB_LISTEN: &str = "0.0.0.0:14180";' src/main.rs || { echo '面板监听不对'; exit 1; }
+          grep -q 'listen = "0.0.0.0:14180"' magisk-module/customize.sh || { echo '安装脚本 listen 不对'; exit 1; }
+          grep -q '192.168.0.1/32' magisk-module/service.sh || { echo '缺 TPROXY 补地址'; exit 1; }
+          grep -q 'SUBSCRIPTION_UA' src/subscription/mod.rs || { echo '订阅修复缺失'; exit 1; }
+          echo '全部落点确认'
 
       - name: 校验构建依赖
         run: |
@@ -72,12 +74,14 @@ jobs:
           (cd release && sha256sum -c "f50mgr-${VERSION}.zip.sha256")
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
 
-      - name: 校验模块包内的监听地址
+      - name: 拆包校验
         run: |
           VERSION="$(tr -d '[:space:]' < VERSION)"
-          mkdir -p /tmp/chk && unzip -o -q "release/f50mgr-${VERSION}.zip" -d /tmp/chk
+          rm -rf /tmp/chk && mkdir -p /tmp/chk
+          unzip -o -q "release/f50mgr-${VERSION}.zip" -d /tmp/chk
           grep -q '0.0.0.0:14180' /tmp/chk/customize.sh || { echo '包内 customize.sh 仍写死面板地址'; exit 1; }
-          echo '模块包内 customize.sh 已是 0.0.0.0'
+          grep -q '192.168.0.1/32' /tmp/chk/service.sh || { echo '包内 service.sh 缺 TPROXY 补地址'; exit 1; }
+          echo '包内脚本校验通过'
 
       - name: 上传编译产物
         uses: actions/upload-artifact@v4
@@ -91,6 +95,5 @@ jobs:
 
       - name: 编译摘要
         run: |
-          echo "构建完成（已打补丁：订阅导入修复 + 畅行60 网段适配）"
+          echo "构建完成（订阅修复 + 畅行60 网段适配）"
           ls -lh release/
-          echo "下载: Actions 页 → 本次运行 → 底部 Artifacts"

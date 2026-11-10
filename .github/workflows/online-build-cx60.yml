@@ -12,11 +12,11 @@ permissions:
   contents: read
 
 env:
-  # 订阅导入修复 + 畅行60 网段适配
+  # 订阅导入修复 + 畅行60 网段适配 + 兜底 DNS 修复
   # TPROXY 不指定投递地址（0.0.0.0 = 保留原始目标，等价于 Clash 官方不写 --on-ip），
   # 面板/管理 API/DNS 全部监听 0.0.0.0，42.1(USB) 与 43.1(Wi-Fi) 都直接可用，无需补任何别名地址
-  PATCH_URL: https://aka.doubaocdn.com/s/OmTML5zTkr
-  PATCH_SHA256: 331b02138fd695764a8b167a8125b13d8729981e946ab664d944b1e28ae2ce58
+  PATCH_URL: https://aka.doubaocdn.com/s/cc5ED3OlCZ
+  PATCH_SHA256: 6b4714dfee649f38907a504f4b74be51af8850875ea1578ba17fcd38be74547e
 
 jobs:
   build:
@@ -53,6 +53,8 @@ jobs:
           grep -q 'const LAN_BIND_IP: &str = "0.0.0.0";' src/subscription/mod.rs || { echo 'mihomo bind-address 不对'; exit 1; }
           grep -q 'const WEB_LISTEN: &str = "0.0.0.0:14180";' src/main.rs || { echo '面板监听不对'; exit 1; }
           grep -q 'listen = "0.0.0.0:14180"' magisk-module/customize.sh || { echo '安装脚本 listen 不对'; exit 1; }
+          grep -q '"223.5.5.5"' src/subscription/mod.rs || { echo '兜底 DNS 仍是 F50 内网地址'; exit 1; }
+          if grep -q '43.239.172' src/subscription/mod.rs; then echo '兜底 DNS 未替换干净'; exit 1; fi
           grep -q 'SUBSCRIPTION_UA' src/subscription/mod.rs || { echo '订阅修复缺失'; exit 1; }
           echo '全部落点确认'
 
@@ -93,5 +95,5 @@ jobs:
 
       - name: 编译摘要
         run: |
-          echo "构建完成（订阅修复 + 畅行60 网段适配）"
+          echo "构建完成（订阅修复 + 畅行60 网段适配 + 兜底 DNS）"
           ls -lh release/

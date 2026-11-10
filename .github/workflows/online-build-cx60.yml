@@ -12,9 +12,9 @@ permissions:
   contents: read
 
 env:
-  # 补丁内容：订阅导入修复 + 畅行60 网段适配（监听改 0.0.0.0）
-  PATCH_URL: https://aka.doubaocdn.com/s/qPdwRlFEVU
-  PATCH_SHA256: 957ed6b13938f912e9c7572d65013a71ef41900050ff61cd300400c2c756c7e6
+  # 补丁内容：订阅导入修复 + 畅行60 网段适配（监听改 0.0.0.0，含 magisk-module/customize.sh 的 listen）
+  PATCH_URL: https://aka.doubaocdn.com/s/09DUUxVdX6
+  PATCH_SHA256: 50c51922a2fe05275777aaac675cba77e9dae2c5038641840c15c71a7e12743b
 
 jobs:
   build:
@@ -44,7 +44,16 @@ jobs:
           git add -A
           git commit -m "畅行60 适配：监听改 0.0.0.0 + 订阅导入修复" \
             --author="GitHub Actions <actions@github.com>"
-          echo '已应用补丁：订阅导入修复 + 畅行60 网段适配'
+          echo '已应用补丁：订阅导入修复 + 畅行60 网段适配（含模块脚本）'
+
+      - name: 校验补丁结果
+        run: |
+          set -e
+          grep -q 'listen = "0.0.0.0:14180"' magisk-module/customize.sh
+          grep -q 'const LAN_BIND_IP: &str = "0.0.0.0";' src/subscription/mod.rs
+          grep -q 'const WEB_LISTEN: &str = "0.0.0.0:14180";' src/main.rs
+          grep -q 'SUBSCRIPTION_UA' src/subscription/mod.rs
+          echo '补丁落点全部确认'
 
       - name: 校验构建依赖
         run: |
@@ -62,6 +71,13 @@ jobs:
           test -s "release/f50mgr-${VERSION}.zip"
           (cd release && sha256sum -c "f50mgr-${VERSION}.zip.sha256")
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+
+      - name: 校验模块包内的监听地址
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          mkdir -p /tmp/chk && unzip -o -q "release/f50mgr-${VERSION}.zip" -d /tmp/chk
+          grep -q '0.0.0.0:14180' /tmp/chk/customize.sh || { echo '包内 customize.sh 仍写死面板地址'; exit 1; }
+          echo '模块包内 customize.sh 已是 0.0.0.0'
 
       - name: 上传编译产物
         uses: actions/upload-artifact@v4

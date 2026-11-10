@@ -13,10 +13,10 @@ permissions:
 
 env:
   # 订阅导入修复 + 畅行60 网段适配
-  # 关键：TPROXY 的 --on-ip 必须保留 192.168.0.1（内核要投递到真实本地地址），
-  # 模块 service.sh 会把 192.168.0.1/32 补到 lo；对外监听（面板/API/DNS）才是 0.0.0.0
-  PATCH_URL: https://aka.doubaocdn.com/s/5cCRGm384f
-  PATCH_SHA256: 866828d1990678fb9eaebaa5a72afbbb0f1b90e26e10a763df1bbc3780032e75
+  # TPROXY 不指定投递地址（0.0.0.0 = 保留原始目标，等价于 Clash 官方不写 --on-ip），
+  # 面板/管理 API/DNS 全部监听 0.0.0.0，42.1(USB) 与 43.1(Wi-Fi) 都直接可用，无需补任何别名地址
+  PATCH_URL: https://aka.doubaocdn.com/s/OmTML5zTkr
+  PATCH_SHA256: 331b02138fd695764a8b167a8125b13d8729981e946ab664d944b1e28ae2ce58
 
 jobs:
   build:
@@ -49,11 +49,10 @@ jobs:
       - name: 校验补丁落点
         run: |
           set -e
-          grep -q 'const LAN_BIND_IP: &str = "192.168.0.1";' src/iptables/rules.rs || { echo 'TPROXY 投递地址被改错了'; exit 1; }
+          grep -q 'const LAN_BIND_IP: &str = "0.0.0.0";' src/iptables/rules.rs || { echo 'TPROXY 投递地址不对'; exit 1; }
           grep -q 'const LAN_BIND_IP: &str = "0.0.0.0";' src/subscription/mod.rs || { echo 'mihomo bind-address 不对'; exit 1; }
           grep -q 'const WEB_LISTEN: &str = "0.0.0.0:14180";' src/main.rs || { echo '面板监听不对'; exit 1; }
           grep -q 'listen = "0.0.0.0:14180"' magisk-module/customize.sh || { echo '安装脚本 listen 不对'; exit 1; }
-          grep -q '192.168.0.1/32' magisk-module/service.sh || { echo '缺 TPROXY 补地址'; exit 1; }
           grep -q 'SUBSCRIPTION_UA' src/subscription/mod.rs || { echo '订阅修复缺失'; exit 1; }
           echo '全部落点确认'
 
@@ -80,7 +79,6 @@ jobs:
           rm -rf /tmp/chk && mkdir -p /tmp/chk
           unzip -o -q "release/f50mgr-${VERSION}.zip" -d /tmp/chk
           grep -q '0.0.0.0:14180' /tmp/chk/customize.sh || { echo '包内 customize.sh 仍写死面板地址'; exit 1; }
-          grep -q '192.168.0.1/32' /tmp/chk/service.sh || { echo '包内 service.sh 缺 TPROXY 补地址'; exit 1; }
           echo '包内脚本校验通过'
 
       - name: 上传编译产物

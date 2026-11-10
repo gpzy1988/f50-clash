@@ -1,0 +1,80 @@
+name: Online Build（畅行60 适配）
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 要编译的分支或标签（留空 = 默认分支）
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # 补丁内容：订阅导入修复 + 畅行60 网段适配（监听改 0.0.0.0）
+  PATCH_URL: https://aka.doubaocdn.com/s/qPdwRlFEVU
+  PATCH_SHA256: 957ed6b13938f912e9c7572d65013a71ef41900050ff61cd300400c2c756c7e6
+
+jobs:
+  build:
+    name: f50mgr 在线编译（畅行60 适配）
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: 检出完整 Git 历史
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: 下载并应用补丁
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 --retry-delay 5 -o /tmp/cx60.patch "$PATCH_URL"
+          test -s /tmp/cx60.patch || { echo '补丁下载为空'; exit 1; }
+          echo "$PATCH_SHA256  /tmp/cx60.patch" | sha256sum -c - \
+            || { echo '补丁校验失败（下载被截断或被篡改）'; exit 1; }
+          git apply --3way /tmp/cx60.patch \
+            || { echo '补丁应用失败：源码与补丁基线不一致'; exit 1; }
+          git config user.email actions@github.com
+          git config user.name "GitHub Actions"
+          git add -A
+          git commit -m "畅行60 适配：监听改 0.0.0.0 + 订阅导入修复" \
+            --author="GitHub Actions <actions@github.com>"
+          echo '已应用补丁：订阅导入修复 + 畅行60 网段适配'
+
+      - name: 校验构建依赖
+        run: |
+          for tool in git docker curl zip unzip; do
+            command -v "${tool}" >/dev/null || { echo "缺少 ${tool}"; exit 1; }
+          done
+          docker version --format 'Docker {{.Server.Version}}'
+
+      - name: 执行官方构建 build.sh
+        run: ./build.sh
+
+      - name: 校验制品 SHA-256
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          test -s "release/f50mgr-${VERSION}.zip"
+          (cd release && sha256sum -c "f50mgr-${VERSION}.zip.sha256")
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: f50mgr-online-build-cx60
+          path: |
+            release/f50mgr-${{ env.VERSION }}.zip
+            release/f50mgr-${{ env.VERSION }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 编译摘要
+        run: |
+          echo "构建完成（已打补丁：订阅导入修复 + 畅行60 网段适配）"
+          ls -lh release/
+          echo "下载: Actions 页 → 本次运行 → 底部 Artifacts"
